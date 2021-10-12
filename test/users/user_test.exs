@@ -3,26 +3,20 @@ defmodule Exlivery.Users.UserTest do
 
   alias Exlivery.Users.User
 
+  import Exlivery.Factory
+
   describe "build/5" do
     test "when all params are alid, returns the user" do
       response =
         User.build(
-          "Rua das bananeiras",
+          "Rua das Bananeiras, 35",
           "Rômulo",
           "romulo@banana.com",
-          "123456789",
+          "12345678900",
           22
         )
 
-      expected_response =
-        {:ok,
-         %User{
-           address: "Rua das bananeiras",
-           age: 22,
-           cpf: "123456789",
-           email: "romulo@banana.com",
-           name: "Rômulo"
-         }}
+      expected_response = {:ok, build(:user)}
 
       assert response == expected_response
     end
