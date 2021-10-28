@@ -982,4 +982,196 @@ defmodule Exlivery.Orders.OrderTest do
 end
 ```
 
+## Utilizando Agents pra manter estado
+
+Os processos normalmente têm um estado porque ele tem um pedaço de memória que ele pode enviar e receber mensagens, e manter um dado enquanto ele viver.
+
+[Agent](https://elixir-lang.org/getting-started/mix-otp/agent.html) é um processo específico para guardar estados.
+
+Na linguagem funcional, temos o contexto imutável. Então, não trabalhamos com variáveis globais, ou classes (objetos) que mantém estados.
+
+Para simular um banco de dados, onde poderemos salvar e atualizar usuários e pedidos, vamos utilizar o Agent.
+
+O Agent é usado em produção em casos muito específicos, mas para podermos avançar na nossa lógica e poder avançar nos conceitos da linguagem em si, é legal fazermos esse passo para habituarmos com pattern matching, funções, módulo Enum, e para simular a ideia de banco de dados.
+
+Faremos uma introdução em `Agent` pelo `iex`. Usamos o módulo Agent para criar um Agent e quando iniciamos o Agent, criamos a função para dizer o estado inicial dele.
+
+```elixir
+iex> Agent.start_link fn -> %{} end
+{:ok, #PID<0.198.0>}
+```
+
+Recebemos um PID pois ele é um processo. Vamos salvar sua referência por pattern matching
+
+```elixir
+iex> {:ok, agent} = Agent.start_link fn -> %{} end
+{:ok, #PID<0.200.0>}
+```
+
+Lembrando que usamos `Process.alive` para saber se o processo estava vivo
+
+```elixir
+iex> Process.alive?(agent)
+true
+```
+
+Então o `agent` está vivo enquanto a aplicação está em execução ou enquanto não o encerrarmos explicitamente.
+
+Podemos atualizar o estado desse `agent`
+
+```elixir
+iex> Agent.update(agent, fn my_map -> Map.put(my_map, :fruta, "banana") end)
+:ok
+
+iex> Agent.get(agent, fn my_map -> my_map end)
+%{fruta: "banana"}
+```
+
+Podemos ver o estado e a fruta ainda está no estado ainda.
+
+Ao atualizar de novo o `agent`
+
+```elixir
+iex> Agent.update(agent, fn my_map -> Map.put(my_map, :vegetal, "cenoura") end)
+:ok
+
+iex> Agent.get(agent, fn my_map -> my_map end)
+%{fruta: "banana", vegetal: "cenoura"}
+```
+
+O map vai existir enquanto o `agent` executar.
+
+Então, vamos usar o `Agent` para manter o estado de usuário e de pedido da aplicação.
+
+## Criando o User Agent
+
+Vamos criar um novo arquivo no contexto de user `users/agent.ex`. Precisamos criar a função `start_link` para iniciar o Agent e ter um PID de retorno. Recebemos o estado inicial mas não iremos utilizá-lo. Essa função devolve o estado inicial, que vai ser um map vazio onde iremos armazenar os usuários. Sempre que usamos o Agent dentro de um módulo, damos um nome a ele para podemos utilizá-lo fora desse módulo.
+
+```elixir
+defmodule Exlivery.Users.Agent do
+  alias Exlivery.Users.User
+
+  use Agent
+
+  def start_link(_initial_state) do
+    Agent.start_link(fn -> %{} end, name: __MODULE__)
+  end
+
+end
+```
+
+Vamos criar a função de `save` que vai receber uma struct de user e vamos chamar a função `Agent.update` passando o PID, que nesse caso é o nome do módulo. Também precisamos de uma função `update_state` para colocarmos nosso usuário no estado atual.
+
+Por pattern matching, pegamos o cpf do user e então vamos alterar o nosso agent
+
+```elixir
+defmodule Exlivery.Users.Agent do
+  alias Exlivery.Users.User
+
+  use Agent
+
+  def start_link(_initial_state) do
+    Agent.start_link(fn -> %{} end, name: __MODULE__)
+  end
+
+  def save(%User{} = user), do: Agent.update(__MODULE__, &update_state(&1, user))
+
+  defp update_state(state, %User{cpf: cpf} = user), do: Map.put(state, cpf, user)
+end
+```
+
+Para ler os dados do Agent, vamos criar a função `get` e `get_user`. Se passar um cpf inexistente, retornamos um `:error`.
+
+```elixir
+defmodule Exlivery.Users.Agent do
+  alias Exlivery.Users.User
+
+  use Agent
+
+  def start_link(_initial_state) do
+    Agent.start_link(fn -> %{} end, name: __MODULE__)
+  end
+
+  def save(%User{} = user), do: Agent.update(__MODULE__, &update_state(&1, user))
+
+  def get(cpf), do: Agent.get(__MODULE__, &get_user(&1, cpf))
+
+  defp get_user(state, cpf) do
+    case Map.get(state, cpf) do
+      nil -> {:error, "User not found."}
+      user -> {:ok, user}
+    end
+  end
+
+  defp update_state(state, %User{cpf: cpf} = user), do: Map.put(state, cpf, user)
+end
+```
+
+A função `get_user` também poderia ser assim sem `case`:
+
+```elixir
+  defp get_user(state, cpf) do
+    state
+    |> Map.get(cpf)
+    |> handle_get()
+  end
+
+  defp handle_get(nil), do: {:error, "User not found."}
+  defp handle_get(user), do: {:ok, user}
+```
+
+No `iex` vamos criar uma mapa qualquer e ver o retorno do `Map.get` com uma chave existente `:a` e com uma chave inexistente `:c`
+
+```elixir
+iex> map = %{a: 1, b: 2}
+%{a: 1, b: 2}
+
+iex> Map.get(map, :a)
+1
+
+iex> Map.get(map, :c)
+nil
+```
+
+Para criar um `alias` direto, o módulo `Agent` já existe, então vamos renomear com `as`. Temos que passar qualquer coisas no `start_link` mesmo que não usamos o estado inicial.
+
+Precisamos criar um `user` para então salvá-lo `user` no nosso `Agent.
+
+```elixir
+iex> alias Exlivery.Users.Agent, as: UserAgent
+Exlivery.Users.Agent
+
+iex> UserAgent.start_link(%{})
+{:ok, #PID<0.564.0>}
+
+iex> alias Exlivery.Users.User
+Exlivery.Users.User
+
+iex> {:ok, user} = User.build("Rua das bananeiras", "Rômulo", "romulo@banana.com", "12345678900", 22)
+{:ok,
+ %Exlivery.Users.User{
+   address: "Rua das bananeiras",
+   age: 22,
+   cpf: "12345678900",
+   email: "romulo@banana.com",
+   name: "Rômulo"
+ }}
+
+iex> UserAgent.save(user)
+:ok
+
+iex> UserAgent.get("12345678900")
+{:ok,
+ %Exlivery.Users.User{
+   address: "Rua das bananeiras",
+   age: 22,
+   cpf: "12345678900",
+   email: "romulo@banana.com",
+   name: "Rômulo"
+ }}
+
+iex> UserAgent.get("banana")
+{:error, "User not found."}
+```
+
 ---
