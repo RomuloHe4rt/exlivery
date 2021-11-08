@@ -1394,4 +1394,380 @@ iex> OrderAgent.get("aab19286-471c-4417-a9de-1378429f84e0")
  }}
 ```
 
+Criamos as faxadas pois é muito custoso criar no `iex` cada etapa.
+
+## Facilitando a criação de Orders pt 1
+
+Vamos facilitar a criação dos pedidos. Vamos criar um arquivo `create_or_update` para o contexto de `orders`. Precisamos receber um `user` e seus `items`.
+
+Como temos que fazer uma validação se o `user` existe e se cada `item` existe, ficaria complicado usar um monte de `case` ou de funções de `handle`.
+
+No Elixir, podemos usar o `with` que é um controle de fluxo que só vai executar `OrderAgent` se matching em todas tuplas.
+
+```elixir
+defmodule Exlivery.Orders.CreateOrUpdate do
+  alias Exlivery.Orders.Agent, as: OrderAgent
+  alias Exlivery.Users.Agent, as: UserAgent
+
+  def call(%{user_cpf: user_cpf, items: items}) do
+    with {:ok, user} <- UserAgent.get(user_cpf),
+         {:ok, items} <- build_items(items),
+         {:ok, order} <- Order.build(user, items) do
+      OrderAgent.save(order)
+    end
+  end
+end
+```
+
+E se não der matching, o `with` não gera exceção. Ele devolve o resultado para quem chamou. Então, vai receber o `:error`, como se fosse um callback. Mas antes do `end`, podemos colocar o `else` para repassar o erro para quem chamou. Somente de maneira explícita, pois não seria necessário.
+
+```elixir
+  def call(%{user_cpf: user_cpf, items: items}) do
+    with {:ok, user} <- UserAgent.get(user_cpf),
+         {:ok, items} <- build_items(items),
+         {:ok, order} <- Order.build(user, items) do
+      OrderAgent.save(order)
+    else
+      error -> error
+    end
+  end
+```
+
+## Facilitando a criação de Orders pt 2
+
+Ainda falta criar uma função privada `build_items`. Como estamos na interface com usuário, iremos receber algo como uma lista
+
+```elixir
+[%{description, category, unity_price, quantity}]
+```
+
+E temos que validar todos os items e percorrer essa lista de maps para verificar.
+
+```elixir
+defmodule Exlivery.Orders.CreateOrUpdate do
+  alias Exlivery.Orders.Agent, as: OrderAgent
+  alias Exlivery.Orders.{Item, Order}
+  alias Exlivery.Users.Agent, as: UserAgent
+
+  def call(%{user_cpf: user_cpf, items: items}) do
+    with {:ok, user} <- UserAgent.get(user_cpf),
+         {:ok, items} <- build_items(items),
+         {:ok, order} <- Order.build(user, items) do
+      OrderAgent.save(order)
+    else
+      error -> error
+    end
+  end
+
+  defp build_items(items) do
+    items
+    |> Enum.map(&build_item/1)
+    |> handle_build()
+  end
+
+  defp build_item(%{
+         description: description,
+         category: category,
+         unity_price: unity_price,
+         quantity: quantity
+       }) do
+    case Item.build(description, category, unity_price, quantity) do
+      {:ok, item} -> item
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp handle_build(items) do
+    if Enum.all?(items, &is_struct/1), do: {:ok, items}, else: {:error, "Invalid items."}
+  end
+end
+```
+
+Agora na nossa fachada em `exlivery.ex`, vamos adicionar o `defdelegate` do `OrderAgent`
+
+```elixir
+defmodule Exlivery do
+  alias Exlivery.Orders.Agent, as: OrderAgent
+  alias Exlivery.Orders.CreateOrUpdate, as: CreateOrUpdateOrders
+  alias Exlivery.Users.Agent, as: UserAgent
+  alias Exlivery.Users.CreateOrUpdate, as: CreateOrUpdateUser
+
+  def start_agents do
+    UserAgent.start_link(%{})
+    OrderAgent.start_link(%{})
+  end
+
+  defdelegate create_or_update_user(params), to: CreateOrUpdateUser, as: :call
+  defdelegate create_or_update_order(params), to: CreateOrUpdateOrders, as: :call
+end
+```
+
+Finalmente, podemos testar no `iex`
+
+```elixir
+ex> Exlivery.start_agents
+{:ok, #PID<0.200.0>}
+
+iex> user_params = %{name: "Rômulo", email: "romulo@banana.com", address: "Rua das bananeiras", cpf: "12345678900", age: 22}
+%{
+  address: "Rua das bananeiras",
+  age: 22,
+  cpf: "12345678900",
+  email: "romulo@banana.com",
+  name: "Rômulo"
+}
+
+iex> Exlivery.create_or_update_user(user_params)
+:ok
+
+iex> items = [%{description: "Pizza de frango", category: :pizza, unity_price: 35.50, quantity: 1}, %{description: "Açaí 500mL", category: :sobremesa, unity_price: 15.00, quantity: 1}]
+[
+  %{
+    category: :pizza,
+    description: "Pizza de frango",
+    quantity: 1,
+    unity_price: 35.5
+  },
+  %{
+    category: :sobremesa,
+    description: "Açaí 500mL",
+    quantity: 1,
+    unity_price: 15.0
+  }
+]
+
+iex> Exlivery.create_or_update_order(%{user_cpf: "12345678900", items: items})
+{:ok, "329e8c7f-f76c-4bf3-8667-bc0021faa954"}
+
+iex> alias Exlivery.Orders.Agent, as: OrderAgent
+Exlivery.Orders.Agent
+
+iex> OrderAgent.get("329e8c7f-f76c-4bf3-8667-bc0021faa954")
+{:ok,
+ %Exlivery.Orders.Order{
+   delivery_address: "Rua das bananeiras",
+   items: [
+     %Exlivery.Orders.Item{
+       category: :pizza,
+       description: "Pizza de frango",
+       quantity: 1,
+       unity_price: #Decimal<35.5>
+     },
+     %Exlivery.Orders.Item{
+       category: :sobremesa,
+       description: "Açaí 500mL",
+       quantity: 1,
+       unity_price: #Decimal<15.0>
+     }
+   ],
+   total_price: #Decimal<50.50>,
+   user_cpf: "12345678900"
+ }}
+```
+
+Vamos testar um caso de erro
+
+```elixir
+iex> items = [%{description: "Pizza de frango", category: :pizza, unity_price: 35.50, quantity: 1}, %{description: "Açaí 500mL", category: :sobremesa, unity_price: 15.00, quantity: 0}]
+[
+  %{
+    category: :pizza,
+    description: "Pizza de frango",
+    quantity: 1,
+    unity_price: 35.5
+  },
+  %{
+    category: :sobremesa,
+    description: "Açaí 500mL",
+    quantity: 0,
+    unity_price: 15.0
+  }
+]
+
+iex> Exlivery.create_or_update_order(%{user_cpf: "12345678900", items: items})
+{:error, "Invalid items."}
+```
+
+E voltamos para um item que existe, porém, vamos passar um cpf errado
+
+```elixir
+iex> Exlivery.create_or_update_order(%{user_cpf: "123", items: items})
+{:error, "User not found"}
+```
+
+## Testando o User Agent
+
+Criamos o arquivo `agent_test.ex` dentro do contexto de test de user.
+
+Não vale a pena testar o `start_link`, pois só usamos ele para startar o `agent` e ele retorna um `:ok`.
+
+Para buildar o user já temos a factory.
+
+```elixir
+defmodule Exlivery.Users.AgentTest do
+  use ExUnit.Case
+
+  alias Exlivery.Users.Agent, as: UserAgent
+
+  import Exlivery.Factory
+
+  describe "save/1" do
+    test "saves the user" do
+      user = build(:user)
+
+      UserAgent.start_link(%{})
+
+      assert UserAgent.save(user) == :ok
+    end
+  end
+
+  describe "get/1" do
+    test "when the user is found, returns the user" do
+      UserAgent.start_link(%{})
+
+      :user
+      |> build(cpf: "78945612300")
+      |> UserAgent.save()
+
+      response = UserAgent.get("78945612300")
+
+      expected_response =
+        {:ok,
+         %Exlivery.Users.User{
+           address: "Rua das bananeiras, 35",
+           age: 22,
+           cpf: "78945612300",
+           email: "romulo@banana.com",
+           name: "Rômulo"
+         }}
+
+      assert response == expected_response
+    end
+
+    test "when the user is not found, returns an error" do
+      UserAgent.start_link(%{})
+
+      response = UserAgent.get("00000000000")
+
+      expected_response = {:error, "User not found"}
+
+      assert response == expected_response
+    end
+  end
+end
+```
+
+Vemos que repetimos toda vez o `start_link`, então, vamos fazer o setup
+
+```elixir
+defmodule Exlivery.Users.AgentTest do
+  use ExUnit.Case
+
+  alias Exlivery.Users.Agent, as: UserAgent
+
+  import Exlivery.Factory
+
+  describe "save/1" do
+    test "saves the user" do
+      user = build(:user)
+
+      UserAgent.start_link(%{})
+
+      assert UserAgent.save(user) == :ok
+    end
+  end
+
+  describe "get/1" do
+    setup do
+      UserAgent.start_link(%{})
+
+      cpf = "78945612300"
+
+      {:ok, cpf: cpf}
+    end
+
+    test "when the user is found, returns the user", %{cpf: cpf} do
+      :user
+      |> build(cpf: cpf)
+      |> UserAgent.save()
+
+      response = UserAgent.get(cpf)
+
+      expected_response =
+        {:ok,
+         %Exlivery.Users.User{
+           address: "Rua das bananeiras, 35",
+           age: 22,
+           cpf: "78945612300",
+           email: "romulo@banana.com",
+           name: "Rômulo"
+         }}
+
+      assert response == expected_response
+    end
+
+    test "when the user is not found, returns an error" do
+      response = UserAgent.get("00000000000")
+
+      expected_response = {:error, "User not found"}
+
+      assert response == expected_response
+    end
+  end
+end
+```
+
+## Testando o Create or Update User
+
+Vamos criar um arquivo `create_or_update_test.ex`. Só temos a função `call` que recebe o map e salva o user com sucesso ou recebe um erro.
+
+```elixir
+defmodule Exlivery.Users.CreateOrUpdateTest do
+  use ExUnit.Case
+
+  alias Exlivery.Users.Agent, as: UserAgent
+  alias Exlivery.Users.CreateOrUpdate
+
+  describe "call/1" do
+    setup do
+      UserAgent.start_link(%{})
+
+      :ok
+    end
+
+    test "when all params are valid, saves the user" do
+      params = %{
+        name: "Rômulo",
+        address: "Rua das bananeiras",
+        email: "romulo@banana.com",
+        cpf: "12345678900",
+        age: 22
+      }
+
+      response = CreateOrUpdate.call(params)
+
+      expected_response = {:ok, "User created or updated successfully"}
+
+      assert response == expected_response
+    end
+
+    test "when there are invalid params, returns an error" do
+      params = %{
+        name: "Rômulo",
+        address: "Rua das bananeiras",
+        email: "romulo@banana.com",
+        cpf: "12345678900",
+        age: 16
+      }
+
+      response = CreateOrUpdate.call(params)
+
+      expected_response = {:error, "Invalid parameters"}
+
+      assert response == expected_response
+    end
+  end
+end
+```
+
 ---
